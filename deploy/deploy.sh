@@ -52,4 +52,8 @@ fi
 printf '%s\n' "$NEW_TAG" > "$CURRENT_TAG_FILE"
 rm -f "$IMAGE_ARCHIVE"
 log "Deployment successful: $IMAGE_NAME:$NEW_TAG is healthy"
+if docker ps --format '{{.Names}}' | grep -qx 'caddy-caddy-1'; then
+  log 'Reloading Caddy configuration'
+  docker exec caddy-caddy-1 caddy reload --config /etc/caddy/Caddyfile
+fi
 docker compose -f "$COMPOSE_FILE" ps
