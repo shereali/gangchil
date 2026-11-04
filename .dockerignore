@@ -1,0 +1,12 @@
+node_modules
+.nuxt
+.output
+.git
+.github
+.env
+.env.*
+!.env.example
+backend/vendor
+coverage
+dist
+*.log

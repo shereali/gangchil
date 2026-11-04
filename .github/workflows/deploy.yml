@@ -1,0 +1,123 @@
+name: Build and deploy Gangchil Homes
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify Nuxt production build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Build Nuxt application
+        run: npm run build
+
+  deploy:
+    name: Deploy to VPS
+    needs: verify
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check deployment secrets
+        id: config
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+        run: |
+          missing=()
+          for name in VPS_HOST VPS_USER VPS_SSH_KEY; do
+            if [ -z "${!name}" ]; then missing+=("$name"); fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "Deployment skipped. Add Actions secrets: ${missing[*]} (VPS_PORT is optional; default 22)." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Check out source
+        if: steps.config.outputs.ready == 'true'
+        uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        if: steps.config.outputs.ready == 'true'
+        uses: docker/setup-buildx-action@v3
+      - name: Build image archive
+        if: steps.config.outputs.ready == 'true'
+        run: |
+          docker buildx build \
+            --platform linux/amd64 \
+            --tag "gangchil-homes:${GITHUB_SHA}" \
+            --output "type=docker,dest=/tmp/app-image.tar" \
+            .
+          gzip -1 /tmp/app-image.tar
+      - name: Configure SSH
+        if: steps.config.outputs.ready == 'true'
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 ~/.ssh
+          if printf '%s' "$VPS_SSH_KEY" | grep -q -- '-----BEGIN .*PRIVATE KEY-----'; then
+            printf '%s\n' "$VPS_SSH_KEY" | tr -d '\r' > ~/.ssh/deploy_key
+          else
+            printf '%s' "$VPS_SSH_KEY" | tr -d '\r\n[:space:]' | base64 --decode > ~/.ssh/deploy_key
+          fi
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keygen -y -f ~/.ssh/deploy_key >/dev/null
+          port="${VPS_PORT:-22}"
+          ssh-keyscan -p "$port" -H "$VPS_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          chmod 600 ~/.ssh/known_hosts
+      - name: Confirm VPS deployment prerequisites
+        if: steps.config.outputs.ready == 'true'
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          ssh -i ~/.ssh/deploy_key -p "${VPS_PORT:-22}" \
+            -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            -o ConnectTimeout=15 "$VPS_USER@$VPS_HOST" \
+            'docker --version >/dev/null && docker network inspect caddy_net >/dev/null && test -w /var/www/gangchilhomes && echo VPS_READY'
+      - name: Transfer image and deployment files
+        if: steps.config.outputs.ready == 'true'
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          port="${VPS_PORT:-22}"
+          remote="$VPS_USER@$VPS_HOST"
+          ssh -i ~/.ssh/deploy_key -p "$port" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            "$remote" 'mkdir -p /var/www/gangchilhomes/deploy'
+          scp -i ~/.ssh/deploy_key -P "$port" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            /tmp/app-image.tar.gz deploy/deploy.sh \
+            "$remote:/var/www/gangchilhomes/deploy/"
+          scp -i ~/.ssh/deploy_key -P "$port" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            docker-compose.yml "$remote:/var/www/gangchilhomes/"
+      - name: Activate release
+        if: steps.config.outputs.ready == 'true'
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          ssh -i ~/.ssh/deploy_key -p "${VPS_PORT:-22}" \
+            -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            "$VPS_USER@$VPS_HOST" \
+            "bash /var/www/gangchilhomes/deploy/deploy.sh '$GITHUB_SHA'"

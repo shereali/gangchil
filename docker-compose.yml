@@ -1,0 +1,20 @@
+services:
+  web:
+    image: gangchil-homes:${IMAGE_TAG:-latest}
+    container_name: gangchilhomes-frontend-1
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      NITRO_HOST: 0.0.0.0
+      PORT: 3000
+    expose:
+      - "3000"
+    networks:
+      - default
+      - caddy_net
+
+networks:
+  default:
+    driver: bridge
+  caddy_net:
+    external: true
